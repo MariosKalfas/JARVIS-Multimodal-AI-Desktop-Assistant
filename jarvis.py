@@ -23,6 +23,7 @@ from gtts import gTTS
 import time
 import edge_tts
 import asyncio
+import psutil
 
 # ==========================================
 # BROWSER CONFIGURATION
@@ -77,8 +78,30 @@ def get_news():
         news_list = [x.text.strip() for x in headlines[:3]] 
         return "Here are the top headlines. " + ". ".join(news_list)
     except Exception:
-        return "I am unable to retrieve the news right now sir."
+        return "I am unable to retrieve the news right now sir." 
 
+def get_system_diagnostics():
+    """Reads the PC's hardware sensors for CPU, RAM, and Battery."""
+    # 1. Check CPU usage (interval=1 gives it a second to measure accurately)
+    cpu_usage = psutil.cpu_percent(interval=1)
+    
+    # 2. Check RAM usage
+    ram = psutil.virtual_memory()
+    ram_percentage = ram.percent
+    ram_free_gb = round(ram.available / (1024 ** 3), 1)
+    
+    # 3. Check Battery (if you are on a laptop)
+    battery = psutil.sensors_battery()
+    battery_status = ""
+    if battery:
+        plugged_in = "plugged in and charging" if battery.power_plugged else "running on battery power"
+        battery_status = f" Battery levels are at {battery.percent} percent and the system is {plugged_in}."
+        
+    # 4. Format the final JARVIS report
+    report = f"Sir, current CPU utilization is at {cpu_usage} percent. Memory usage is at {ram_percentage} percent, with {ram_free_gb} gigabytes of free space available.{battery_status} All systems are functioning within normal parameters."
+    
+    return report    
+    
 # ==========================================
 # 3. CORE FUNCTIONS
 # ==========================================
@@ -129,15 +152,20 @@ def speak(text):
 def listen():
     """Listens to the microphone and converts spoken words into text."""
     recognizer = sr.Recognizer()
+
+    #Tell JARVIS to wait for 2 full seconds of silence before assuming you are done talking
+    recognizer.pause_threshold = 1.4
     
     with sr.Microphone() as source:
         print("\n[Listening...]")
         # 1. Calibrate for a split second to ignore background room noise
         recognizer.adjust_for_ambient_noise(source, duration=0.5)
+
+        recognizer.energy_threshold = 300
         
         try:
             # 2. Capture the audio! (timeout=5 means he gives up if you are silent for 5 seconds)
-            audio = recognizer.listen(source, timeout=5, phrase_time_limit=10)
+            audio = recognizer.listen(source, timeout=5)
             print("[Processing...]")
             
             # 3. Use Google's free API to translate the audio to text
@@ -157,7 +185,7 @@ def listen():
 
 # 1. Create the memory bank (put this right above your think function)
 chat_history = [
-    {"role": "system", "content": "You are JARVIS. You speak in a helpful, highly intelligent, and slightly witty tone. Keep your responses very brief—no more than 1 or 2 sentences."}
+    {"role": "system", "content": "You are JARVIS, the highly advanced AI assistant created by Tony Stark. You are impeccably polite, elegantly British, and highly efficient. You often use dry, subtle sarcasm, but you are completely devoted to serving 'Sir'. Never break character. Keep all responses under two sentences."}
 ]
  
 MEMORY_FILE = "jarvis_memory.json"
@@ -434,6 +462,29 @@ def execute_command(command):
     elif "look at the screen" in cmd or "what is on my screen" in cmd:
         vision_reply = look_at_screen()
         speak(vision_reply)
+        return True
+
+   
+    elif "system diagnostic" in cmd or "status report" in cmd:
+        speak("Running a full system diagnostic sir.")
+        
+        # Grab the sensor data
+        vitals = get_system_diagnostics()
+        
+        # Have JARVIS speak the results
+        speak(vitals)
+        return True
+
+    elif "clear memory" in cmd or "delete memory" in cmd:
+        speak("Purging my recent conversational memory sir.")
+        
+        # 1. This deletes everything in the list EXCEPT index 0 (the JARVIS system prompt)
+        del chat_history[2:]
+        
+        # 2. Save this clean slate to the hard drive so the JSON file shrinks instantly
+        save_memory(chat_history)
+        
+        speak("Memory cleared sir.")
         return True    
 
 
@@ -444,7 +495,23 @@ def execute_command(command):
 # ==========================================
 
 def main():
-    speak("Welcome home sir; I am at your service.")
+    # 1. Figure out what time of day it is
+    now = datetime.datetime.now()
+    hour = now.hour
+    current_time = now.strftime("%I:%M %p")
+    
+    if hour < 12:
+        greeting = "Good morning"
+    elif hour < 18:
+        greeting = "Good afternoon"
+    else:
+        greeting = "Good evening"
+        
+    # 2. Fetch the local weather network
+    weather_report = get_weather()
+    
+    # 3. Deliver the cinematic startup briefing!
+    speak(f"{greeting}, sir. It is currently {current_time}. {weather_report} All systems are online and I am standing by.")
     
     # ==========================================
     # ROUTE A: TEXT MODE (NO MIC CONNECTED)
@@ -468,9 +535,12 @@ def main():
     # ==========================================
     # ROUTE B: VOICE MODE (WITH WAKE WORD)
     # ==========================================
+    # ==========================================
+    # ROUTE B: VOICE MODE (WITH WAKE WORD)
+    # ==========================================
     else:
         try:
-            porcupine = pvporcupine.create(access_key=PICOVOICE_API_KEY, keywords=["jarvis"])
+            porcupine = pvporcupine.create(access_key=PICOVOICE_API_KEY, keywords=["jarvis"], sensitivities=[0.8])
             pa = pyaudio.PyAudio()
             # If no mic is found, this next line is what causes the OSError!
             audio_stream = pa.open(
@@ -489,30 +559,40 @@ def main():
                 
                 keyword_index = porcupine.process(pcm)
                 
+                # FIXED INDENTATION STARTING HERE
                 if keyword_index >= 0:
                     print("\n[Wake Word Detected!]")
-                    speak("Yes sir?") 
+                    speak("Yes sir?")
                     
-                    command = listen()
-                    
-                    if command.lower() in ["stop", "exit", "quit"]:
-                        speak("Powering down sir")
-                        break
-
-
-                    if "go to sleep" in command or "mute" in command:
-                        speak("Standing by sir.")
-                        continue
-
-        
+                    # ==========================================
+                    # THE ACTIVE CONVERSATION LOOP
+                    # ==========================================
+                    while True:
+                        command = listen()
                         
-                    if command:
-                        action_taken = execute_command(command)
-                        if not action_taken:
-                            reply = think(command)
-                            speak(reply)
+                        # If the room is quiet, just loop back and keep actively listening!
+                        if command == "":
+                            continue
+                        
+                        # 1. The True Kill Switch (Shuts down the whole program)
+                        if "stop" in command or "exit" in command or "quit" in command:
+                            speak("Powering down sir.")
+                            exit() 
+                            
+                        # 2. The Sleep Mode (Breaks this active loop to go back to wake-word hunting)
+                        if "sleep" in command or "mute" in command:
+                            speak("Standing by sir.")
+                            break 
+                        
+                        # 3. Execute normal commands
+                        if command:
+                            action_taken = execute_command(command)
+                            if not action_taken:
+                                reply = think(command)
+                                speak(reply)
                     
-                    print("\n[Background System: Actively listening for 'JARVIS'...]")
+                    # Once he breaks out of the active loop above, he prints this and hunts for "Jarvis" again
+                    print("\n[Background System: Actively listening for 'JARVIS'...]")  
                     
         except Exception as e:
             print(f"\n[Wake Word Error: {e}]")

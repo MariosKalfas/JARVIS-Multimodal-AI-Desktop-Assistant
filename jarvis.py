@@ -24,6 +24,7 @@ import time
 import edge_tts
 import asyncio
 import psutil
+import glob
 
 # ==========================================
 # BROWSER CONFIGURATION
@@ -43,6 +44,18 @@ GROQ_API_KEY = ""
 ELEVENLABS_API_KEY = ""
 WEATHER_API_KEY = ""
 PICOVOICE_API_KEY = ""
+
+# Steam Games Register
+STEAM_GAMES = {
+    "phasmophobia": {"id": "739630", "exe": "Phasmophobia.exe"}
+}
+
+
+
+
+
+
+
 
 TEXT_MODE = False # Set to False when you plug your mic back in!
 
@@ -95,13 +108,73 @@ def get_system_diagnostics():
     battery_status = ""
     if battery:
         plugged_in = "plugged in and charging" if battery.power_plugged else "running on battery power"
-        battery_status = f" Battery levels are at {battery.percent} percent and the system is {plugged_in}."
+        battery_status = f" Battery levels are at {battery.percent} percent and the system is {plugged_in}."        
         
     # 4. Format the final JARVIS report
     report = f"Sir, current CPU utilization is at {cpu_usage} percent. Memory usage is at {ram_percentage} percent, with {ram_free_gb} gigabytes of free space available.{battery_status} All systems are functioning within normal parameters."
     
     return report    
+
+
+def get_storage_info():
+    """Checks C: drive free space and finds largest apps, including hidden Steam games."""
+    disk = psutil.disk_usage('C:\\')
+    free_gb = round(disk.free / (1024 ** 3), 1)
     
+    all_apps = []
+    
+    # 1. Grab normal Windows programs via PowerShell
+    ps_command = r"""
+    $apps = @()
+    $keys = @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*")
+    foreach ($key in $keys) {
+        $apps += Get-ItemProperty $key -ErrorAction SilentlyContinue | Select-Object DisplayName, EstimatedSize | Where-Object { $_.DisplayName -and $_.EstimatedSize }
+    }
+    $apps | ForEach-Object { "$($_.DisplayName)|$($_.EstimatedSize)" }
+    """
+    try:
+        result = subprocess.run(["powershell", "-Command", ps_command], capture_output=True, text=True, timeout=10)
+        for line in result.stdout.strip().split('\n'):
+            if '|' in line:
+                name, size_kb = line.split('|', 1)
+                size_gb = round(float(size_kb) / (1024 ** 2), 1)
+                clean_name = name.split("(x86)")[0].split("v.")[0].strip()
+                all_apps.append((clean_name, size_gb))
+    except Exception:
+        pass
+
+    # 2. INSTANTLY parse Steam's hidden manifest files!
+    # Note: If your Steam is installed on a D: drive, change this path!
+    steam_path = r"C:\Program Files (x86)\Steam\steamapps"
+    if os.path.exists(steam_path):
+        for acf_file in glob.glob(os.path.join(steam_path, "*.acf")):
+            try:
+                with open(acf_file, 'r', encoding='utf-8') as f:
+                    name = "Unknown Steam Game"
+                    size_gb = 0
+                    for line in f:
+                        if '"name"' in line:
+                            name = line.split('"')[3].strip()
+                        elif '"SizeOnDisk"' in line:
+                            size_bytes = int(line.split('"')[3])
+                            size_gb = round(size_bytes / (1024 ** 3), 1)
+                    if size_gb > 0:
+                        all_apps.append((name, size_gb))
+            except Exception:
+                continue
+
+    # 3. Sort everything together and get the true Top 5
+    # Sort by the size (the second item in the tuple), descending
+    all_apps.sort(key=lambda x: x[1], reverse=True)
+    top_5 = all_apps[:5]
+    
+    if top_5:
+        apps_spoken = ", ".join([f"{app[0]} at {app[1]} gigabytes" for app in top_5])
+        return f"Sir, you have {free_gb} gigabytes of free space. Your largest files are: {apps_spoken}."
+    else:
+        return f"Sir, you have {free_gb} gigabytes of free space, but I encountered an error reading the file sizes."
+
+
 # ==========================================
 # 3. CORE FUNCTIONS
 # ==========================================
@@ -380,6 +453,24 @@ def execute_command(command):
         os.system("taskkill /f /im steam.exe")
         return True
     
+    # --- STEAM GAME LAUNCHER ---
+    elif "launch" in cmd or ("play" in cmd and "spotify" not in cmd):
+        for game_name, game_data in STEAM_GAMES.items():
+            if game_name in cmd:
+                speak(f"Booting up {game_name} for you, sir.")
+                # The steam://rungameid/ command forces Steam to launch the game instantly
+                os.system(f"start steam://rungameid/{game_data['id']}")
+                return True
+                
+    # --- STEAM GAME TERMINATOR ---
+    elif "close" in cmd or "quit" in cmd:
+        for game_name, game_data in STEAM_GAMES.items():
+            if game_name in cmd:
+                speak(f"Terminating {game_name}, sir.")
+                # Taskkill forcefully ends the specific game executable
+                os.system(f"taskkill /f /im {game_data['exe']}")
+                return True
+    
 
     elif "open notepad" in cmd:
         speak("Opening Notepad sir.")
@@ -485,6 +576,67 @@ def execute_command(command):
         save_memory(chat_history)
         
         speak("Memory cleared sir.")
+        return True
+
+    # --- DISK STORAGE SCANNER ---
+    elif "calculate storage" in cmd or "calculate disk space" in cmd or "calculate largest programs" in cmd:
+        speak("Scanning your primary drive and registry, sir. One moment.")
+        
+        # Run the scanner
+        storage_report = get_storage_info()
+        
+        # Have JARVIS speak the results
+        speak(storage_report)
+        return True
+
+
+    # --- FOCUS / STUDY PROTOCOL ---
+    elif "focus mode" in cmd or "study mode" in cmd or "protocol focus" in cmd:
+        speak("Initiating Focus Protocol, sir. Shutting down all entertainment modules.")
+        
+        # 1. Forcefully kill a list of distracting apps
+        # The ">nul 2>&1" part makes it fail silently if the app is already closed!
+        distractions = ["steam.exe", "spotify.exe", "discord.exe", "epicgameslauncher.exe"]
+        for app in distractions:
+            os.system(f"taskkill /f /im {app} >nul 2>&1")
+            
+        speak("Distractions neutralized. Opening your workspace.")
+        
+        # 2. Open Notepad for taking notes
+        subprocess.Popen('C:\\Windows\\System32\\notepad.exe')
+        
+        # 3. Open a fresh browser tab to a study website (e.g., Google Scholar, Wikipedia, or your school portal)
+        webbrowser.get('operagx').open("https://scholar.google.com")
+        
+        speak("Your environment is prepared. Good luck with your studies sir.")
+        return True
+
+
+    # --- GOOGLE SEARCH & ANALYSIS ---
+    elif "google" in cmd or "look up for" in cmd:
+        # 1. Extract exactly what you want to search for
+        if "google" in cmd:
+            query = cmd.split("google")[1].strip()
+        else:
+            query = cmd.split("look up")[1].strip()
+            
+        speak(f"Running a global search for {query} sir.")
+        
+        # 2. Open the search in ANY default browser (Removes the Opera GX restriction!)
+        # We replace spaces with '+' so the URL formats correctly
+        formatted_query = query.replace(" ", "+")
+        search_url = f"https://www.google.com/search?q={formatted_query}"
+        
+        # Using standard .open() forces Windows to use your preferred default browser
+        webbrowser.open(search_url) 
+        
+        speak("Cross-referencing my database. Here are my thoughts.")
+        
+        # 3. Ask Groq (JARVIS's brain) to give its thoughts on the topic!
+        prompt = f"I just Googled '{query}'. Provide a brief, highly intelligent, 2-sentence summary and your thoughts on this subject."
+        reply = think(prompt)
+        
+        speak(reply)
         return True    
 
 
@@ -511,7 +663,7 @@ def main():
     weather_report = get_weather()
     
     # 3. Deliver the cinematic startup briefing!
-    speak(f"{greeting}, sir. It is currently {current_time}. {weather_report} All systems are online and I am standing by.")
+    speak(f"{greeting} sir. It is currently {current_time}. {weather_report} All systems are online and I am standing by.")
     
     # ==========================================
     # ROUTE A: TEXT MODE (NO MIC CONNECTED)
